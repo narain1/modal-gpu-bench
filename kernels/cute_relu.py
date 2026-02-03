@@ -32,22 +32,22 @@ def relu_kernel_vectorized(gInput: cute.Tensor, gOutput: cute.Tensor, num_vector
     bdim, _, _ = cute.arch.block_dim()
 
     thread_idx = bidx * bdim + tidx
-    
+
     if thread_idx < num_vectors:
         input_vec = gInput[(None, thread_idx)].load()
-        
+
         v0 = relu_op(input_vec[0])
         v1 = relu_op(input_vec[1])
         v2 = relu_op(input_vec[2])
         v3 = relu_op(input_vec[3])
-        
+
         gOutput[(0, thread_idx)] = v0.to(gOutput.element_type)
         gOutput[(1, thread_idx)] = v1.to(gOutput.element_type)
         gOutput[(2, thread_idx)] = v2.to(gOutput.element_type)
         gOutput[(3, thread_idx)] = v3.to(gOutput.element_type)
 
 @cute.kernel
-def relu_kernel_kv(input_tensor: cute.Tensor, output_tensor: cute.Tensor, tv_layout: cute.Layout):
+def relu_kernel_tv(input_tensor: cute.Tensor, output_tensor: cute.Tensor, tv_layout: cute.Layout):
     tidx, _, _ = cute.arch.thread_idx()
     bidx, _, _ = cute.arch.block_idx()
 
@@ -64,8 +64,6 @@ def relu_kernel_kv(input_tensor: cute.Tensor, output_tensor: cute.Tensor, tv_lay
     tvA_thread = tvA[thr_coord]
     tvB_thread = tvB[thr_coord]
 
-    # Apply ReLU element-wise - iterate through each element
-    # tvA_thread has shape (8,) based on TV layout (256, 8)
     for i in range(8):
         tvB_thread[i] = relu_op(tvA_thread[i]).to(output_tensor.element_type)
 
@@ -85,7 +83,8 @@ def relu_naive(input_tensor: cute.Tensor, output_tensor: cute.Tensor):
 
 @cute.jit
 def relu_vectorized(mInput: cute.Tensor, mOutput: cute.Tensor):
-    threads_per_block = 64
+    # Slightly wider than the original 64, but not as register-heavy as 256.
+    threads_per_block = 128
 
     # Partition input tensor into groups of 4 contiguous elements
     # For 1D tensor of shape (N,), this creates ((4,), (N/4,)) : ((1,), (4,))
@@ -103,35 +102,35 @@ def relu_vectorized(mInput: cute.Tensor, mOutput: cute.Tensor):
 
 
 @cute.jit
-def relu_kv(mInput: cute.Tensor, mOutput: cute.Tensor):
+def relu_tv(mInput: cute.Tensor, mOutput: cute.Tensor):
     # For 1D tensor, use TV layout with thread and value dimensions
     # Each thread loads coalesced_ldst_bytes (16 bytes)
     coalesced_ldst_bytes = 16
-    
+
     # Compile time validation: expect same element type for input and output
     assert mInput.element_type == mOutput.element_type
     dtype = mInput.element_type
-    
+
     # Thread layout: 256 threads per block
     # Value layout: each thread processes coalesced_ldst_bytes worth of elements
     thr_layout = cute.make_ordered_layout((256,), order=(0,))
     val_layout = cute.make_ordered_layout((coalesced_ldst_bytes,), order=(0,))
     val_layout = cute.recast_layout(dtype.width, 8, val_layout)
     tiler, tv_layout = cute.make_layout_tv(thr_layout, val_layout)
-    
+
     # print(f"[DSL INFO] Tiler: {tiler}")
     # print(f"[DSL INFO] TV Layout: {tv_layout}")
-    
+
     # Tile the 1D tensors
     gInput = cute.zipped_divide(mInput, tiler)
     gOutput = cute.zipped_divide(mOutput, tiler)
-    
+
     # print("[DSL INFO] Tiled Tensors:")
     # print(f"[DSL INFO]   gInput = {gInput.type}")
     # print(f"[DSL INFO]   gOutput = {gOutput.type}")
-    
+
     # Launch kernel
-    relu_kernel_kv(gInput, gOutput, tv_layout).launch(
+    relu_kernel_tv(gInput, gOutput, tv_layout).launch(
         grid=[cute.size(gInput, mode=[1]), 1, 1],
         block=[cute.size(tv_layout, mode=[0]), 1, 1],
     )
@@ -140,8 +139,8 @@ def relu_kv(mInput: cute.Tensor, mOutput: cute.Tensor):
 if __name__ == "__main__":
     inp = torch.randn(1 << 20, device='cuda').to(torch.bfloat16)
     out = torch.empty_like(inp)
-    input_cute = from_dlpack(inp, assumed_align=16)
-    output_cute = from_dlpack(out, assumed_align=16)
+    input_cute = from_dlpack(inp, assumed_align=32)
+    output_cute = from_dlpack(out, assumed_align=32)
 
     def verify_relu(fn_name: str, fn):
         out.zero_()
@@ -164,8 +163,8 @@ if __name__ == "__main__":
 
     verify_relu("relu_naive", relu_naive)
     verify_relu("relu_vectorized", relu_vectorized)
-    verify_relu("relu_kv", relu_kv)
+    verify_relu("relu_tv", relu_tv)
 
     benchmark_relu("relu_naive", relu_naive)
     benchmark_relu("relu_vectorized", relu_vectorized)
-    benchmark_relu("relu_kv", relu_kv)
+    benchmark_relu("relu_tv", relu_tv)

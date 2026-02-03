@@ -1,6 +1,6 @@
 # TODO
 
-[] relu kernel
+[x] relu kernel
 [] Vector add
 [] matrix multiplication
 [] matrix addition
