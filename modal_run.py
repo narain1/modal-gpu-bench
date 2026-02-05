@@ -58,8 +58,9 @@ def main(script: str = DEFAULT_SCRIPT, gpu: str = DEFAULT_GPU, timeout: int = DE
         print(f"Error: Script '{script}' not found")
         sys.exit(1)
 
-    print(f"Configuring Modal: script={script}, GPU={gpu}, timeout={timeout}min")
-    execute.remote(script, gpu, timeout)
+    script_name = os.path.basename(script)
+    print(f"Configuring Modal: script={script_name}, GPU={gpu}, timeout={timeout}min")
+    execute.remote(script_name, gpu, timeout)
 
 @app.function(
     image=image,
@@ -69,6 +70,7 @@ def main(script: str = DEFAULT_SCRIPT, gpu: str = DEFAULT_GPU, timeout: int = DE
 def execute(script: str, gpu: str, timeout: int):
     """Execute any Python script with specified GPU and timeout."""
     import os
+    from pathlib import Path
 
     script_name = os.path.basename(script)
     file_ext = Path(script_name).suffix.lower()
@@ -102,7 +104,7 @@ def compile_and_run_cuda(cuda_file: str, gpu: str, nvcc_args: list[str] = None):
     output_binary = f"{base_name}"
 
     print(f"Compiling CUDA file: {cuda_file}")
-    print(f"Output binary: {output_binary}")
+    # print(f"Output binary: {output_binary}")
 
     nvcc_cmd = ["nvcc", cuda_file, "-o", output_binary] + nvcc_args
 
@@ -112,7 +114,7 @@ def compile_and_run_cuda(cuda_file: str, gpu: str, nvcc_args: list[str] = None):
             print(f"Compilation failed:\n{result.stderr}")
             return result.returncode
 
-        print(f"Compilation successful")
+        # print(f"Compilation successful")
 
         print(f"Running {output_binary}")
         result = subprocess.run([f"./{output_binary}"], capture_output=True, text=True)
