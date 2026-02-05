@@ -3,6 +3,21 @@ import sys
 import modal
 from modal.mount import Mount
 import os
+import subprocess
+from enum import Enum
+from pathlib import Path
+
+class GPUType(Enum):
+    T4 = "T4"
+    L4 = "L4"
+    A10 = "A10"
+    A100 = "A100"
+    A100_40GB = "A100-40GB"
+    A100_80GB = "A100-80GB"
+    L40S = "L40S"
+    H100 = "H100"
+    H200 = "H200"
+    B200 = "B200"
 
 # Parameters for run
 DEFAULT_GPU = "H100"
@@ -55,22 +70,59 @@ def execute(script: str, gpu: str, timeout: int):
     """Execute any Python script with specified GPU and timeout."""
     import os
 
-    print(f"Using remote python version:")
-    os.system("python --version")
-
     script_name = os.path.basename(script)
+    file_ext = Path(script_name).suffix.lower()
+
     print(f"Executing {script_name} with GPU={gpu}, timeout={timeout}min")
 
-    # Set environment variables for the script to use
     os.environ['GPU'] = gpu
     os.environ['TIMEOUT'] = str(timeout * 60)
 
-    # Execute the script
     os.chdir("/root/scripts")
-    result = os.system(f"python {script_name}")
+
+    if file_ext == ".cu":
+        result = compile_and_run_cuda(script_name, gpu)
+    else:  # .py files
+        result = os.system(f"python {script_name}")
 
     if result != 0:
         print(f"Script exited with code {result}")
     else:
         print(f"Script completed successfully")
+
+
+def compile_and_run_cuda(cuda_file: str, gpu: str, nvcc_args: list[str] = None):
+    import os
+    import subprocess
+
+    if nvcc_args is None:
+        nvcc_args = []
+
+    base_name = os.path.splitext(cuda_file)[0]
+    output_binary = f"{base_name}"
+
+    print(f"Compiling CUDA file: {cuda_file}")
+    print(f"Output binary: {output_binary}")
+
+    nvcc_cmd = ["nvcc", cuda_file, "-o", output_binary] + nvcc_args
+
+    try:
+        result = subprocess.run(nvcc_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"Compilation failed:\n{result.stderr}")
+            return result.returncode
+
+        print(f"Compilation successful")
+
+        print(f"Running {output_binary}")
+        result = subprocess.run([f"./{output_binary}"], capture_output=True, text=True)
+        print(result.stdout)
+        if result.stderr:
+            print(f"Errors:\n{result.stderr}")
+
+        return result.returncode
+
+    except Exception as e:
+        print(f"Error during CUDA compilation/execution: {e}")
+        return 1
 
