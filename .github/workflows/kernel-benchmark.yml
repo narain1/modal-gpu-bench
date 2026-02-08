@@ -41,71 +41,65 @@ jobs:
           echo "" >> benchmark_results.md
           echo "PR #${{ github.event.pull_request.number }} | Commit: ${{ github.event.pull_request.head.sha }}" >> benchmark_results.md
           echo "" >> benchmark_results.md
-          
+
           # Get changed files in kernels directory
           if git rev-parse --is-shallow-repository 2>/dev/null | grep -q true; then
             git fetch --unshallow
           fi
           git fetch origin main
           changed_files=$(git diff --name-only --diff-filter=AM origin/main...HEAD | grep '^kernels/' | grep -E '\.(py|cu)$' || true)
-          
-          if [ -z "$changed_files" ]; then
+
+          if [ -z "${changed_files}" ]; then
             echo "No kernel files were modified in this PR." >> benchmark_results.md
             exit 0
           fi
-          
+
           echo "Kernels Tested" >> benchmark_results.md
           echo "" >> benchmark_results.md
 
           log_dir="benchmark_logs"
-          rm -rf "$log_dir"
-          mkdir -p "$log_dir"
-          
+          rm -rf "${log_dir}"
+          mkdir -p "${log_dir}"
+          GPU_OVERRIDE="H100"
+
           # Function to run and benchmark a kernel
           run_kernel() {
             local script_path=$1
             local filename=$(basename "$script_path")
             local safe_name=$(echo "$script_path" | tr '/' '_')
-            local log_file="$log_dir/${safe_name}.txt"
+            local log_file="${log_dir}/${safe_name}.txt"
 
             echo "### ${filename}" >> benchmark_results.md
             echo "" >> benchmark_results.md
             echo '```' >> benchmark_results.md
 
-            if modal run modal_run.py --script "${script_path}" --gpu "H100" --timeout 2 2>&1 | tee "${log_file}" | tee -a benchmark_results.md; then
+            if modal run modal_run.py --script "${script_path}" --gpu "${GPU_OVERRIDE}" --timeout 2 2>&1 | tee "${log_file}" | tee -a benchmark_results.md; then
               echo '```' >> benchmark_results.md
-              echo "${filename} executed successfully" >> benchmark_results.md
+              echo "${filename} executed successfully on ${GPU_OVERRIDE}" >> benchmark_results.md
             else
               echo '```' >> benchmark_results.md
-              echo "${filename} failed to execute" >> benchmark_results.md
+              echo "${filename} failed to execute on ${GPU_OVERRIDE}" >> benchmark_results.md
             fi
             
             echo "" >> benchmark_results.md
             echo "---" >> benchmark_results.md
             echo "" >> benchmark_results.md
           }
-          
+
           # Run benchmark for each changed kernel file
-          for file in $changed_files; do
-            if [ -f "$file" ]; then
-              run_kernel "$file"
+          for file in ${changed_files}; do
+            if [ -f "${file}" ]; then
+              run_kernel "${file}"
             fi
           done
-          
+
           echo "" >> benchmark_results.md
-          echo "GPU: H100 | Modal Runtime | Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> benchmark_results.md
+          echo "GPU: ${GPU_OVERRIDE} | Modal Runtime | Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> benchmark_results.md
       
       - name: Read benchmark results
         id: read_results
         run: |
-          encoded=$(python <<'PY'
-          import base64
-          from pathlib import Path
-
-          data = Path("benchmark_results.md").read_bytes()
-          print(base64.b64encode(data).decode("utf-8"))
-          PY
-          )
+          encoded=$(python -c "import base64, pathlib; print(base64.b64encode(pathlib.Path('benchmark_results.md').read_bytes()).decode('utf-8'))")
           echo "benchmark_output_base64=${encoded}" >> "$GITHUB_OUTPUT"
       
       - name: Comment PR with results
@@ -113,8 +107,9 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const core = require('@actions/core');
             const output = Buffer.from(process.env.BENCHMARK_OUTPUT_BASE64 ?? '', 'base64').toString('utf8');
-            const prNumber = context.payload.pull_request.number;
+            const prNumber = context.payload.pull_request?.number;
 
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
@@ -131,7 +126,7 @@ jobs:
             const commentBody =
               (typeof output === 'string' && output.trim().length > 0)
                 ? output
-                : "Kernel Benchmark Results\n\n(no benchmark output produced)";
+                : 'Kernel Benchmark Results\n\n(no benchmark output produced)';
 
             if (botComment) {
               await github.rest.issues.updateComment({
