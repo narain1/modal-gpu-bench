@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -100,38 +102,39 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const output = process.env.benchmark_output;
+            const output = `${{ steps.read_results.outputs.benchmark_output }}`;
             const prNumber = context.payload.pull_request.number;
 
-            // Create or update the comment on the pull request
-            const comments = await github.rest.issues.listComments({
+            const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: prNumber,
             });
 
-            const botComment = comments.data.find(comment => 
-              comment.user.type === 'Bot' && 
-              comment.body.includes('🚀 Kernel Benchmark Results')
+            const botComment = comments.find(c =>
+              c.user?.type === 'Bot' &&
+              typeof c.body === 'string' &&
+              c.body.includes('🚀 Kernel Benchmark Results')
             );
 
-            const commentBody = output;
+            const commentBody =
+              (typeof output === 'string' && output.trim().length > 0)
+                ? output
+                : "🚀 Kernel Benchmark Results\n\n(no benchmark output produced)";
 
             if (botComment) {
-              // Update existing comment
               await github.rest.issues.updateComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 comment_id: botComment.id,
-                body: commentBody
+                body: commentBody,
               });
             } else {
-              // Create new comment
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: prNumber,
-                body: commentBody
+                body: commentBody,
               });
             }
       
