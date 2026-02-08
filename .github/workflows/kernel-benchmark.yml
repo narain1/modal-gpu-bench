@@ -103,7 +103,7 @@ jobs:
             const output = process.env.benchmark_output;
             const prNumber = context.payload.pull_request.number;
 
-            // Check if there's already a benchmark comment
+            // Create or update the comment on the pull request
             const comments = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
