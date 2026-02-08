@@ -98,13 +98,13 @@ jobs:
       - name: Read benchmark results
         id: read_results
         run: |
-          encoded=$(python - <<'PY'
-import base64
-from pathlib import Path
+          encoded=$(python <<'PY'
+          import base64
+          from pathlib import Path
 
-data = Path("benchmark_results.md").read_bytes()
-print(base64.b64encode(data).decode("utf-8"))
-PY
+          data = Path("benchmark_results.md").read_bytes()
+          print(base64.b64encode(data).decode("utf-8"))
+          PY
           )
           echo "benchmark_output_base64=${encoded}" >> "$GITHUB_OUTPUT"
       
