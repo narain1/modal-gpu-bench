@@ -1,0 +1,225 @@
+name: Kernel Comment Run
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  manual-benchmark:
+    # Only run on PR comments, only if commenter is narain1
+    if: github.event.issue.pull_request && github.event.comment.user.login == 'narain1'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+
+    steps:
+      - name: Parse run command
+        id: parse_comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const core = require('@actions/core');
+            const body = (context.payload.comment?.body ?? '').trim();
+
+            // Supports: /run kernels/foo.py --gpu H100
+            // Also supports: run kernels/foo.py --gpu H100
+            const match = body.match(/^\/?run\s+(\S+)(?:\s+--gpu\s+(\S+))?\s*$/i);
+
+            if (!match) {
+              core.info('No run command pattern found.');
+              core.setOutput('should_run', 'false');
+              return;
+            }
+
+            const scriptPath = match[1];
+            const gpu = match[2] ?? '';
+
+            if (!scriptPath.startsWith('kernels/')) {
+              core.info(`Ignoring command outside kernels/: ${scriptPath}`);
+              core.setOutput('should_run', 'false');
+              return;
+            }
+
+            if (scriptPath.includes('..') || scriptPath.includes('\\')) {
+              core.info(`Disallowed path in command: ${scriptPath}`);
+              core.setOutput('should_run', 'false');
+              return;
+            }
+
+            if (!/\.(py|cu)$/i.test(scriptPath)) {
+              core.info(`Unsupported kernel extension: ${scriptPath}`);
+              core.setOutput('should_run', 'false');
+              return;
+            }
+
+            core.setOutput('should_run', 'true');
+            core.setOutput('script_path', scriptPath);
+            core.setOutput('gpu', gpu);
+
+      - name: Gather PR metadata
+        if: steps.parse_comment.outputs.should_run == 'true'
+        id: pr_info
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const core = require('@actions/core');
+            const prNumber = context.payload.issue.number;
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('head_sha', pr.head.sha);
+
+      - name: Checkout PR code
+        if: steps.parse_comment.outputs.should_run == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Most reliable for issue_comment-triggered workflows
+          ref: refs/pull/${{ steps.pr_info.outputs.pr_number }}/head
+
+      - name: Set up Python
+        if: steps.parse_comment.outputs.should_run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Modal CLI
+        if: steps.parse_comment.outputs.should_run == 'true'
+        run: pip install modal
+
+      - name: Set Modal token
+        if: steps.parse_comment.outputs.should_run == 'true'
+        run: |
+          modal token set --token-id ${{ secrets.MODAL_TOKEN_ID }} --token-secret ${{ secrets.MODAL_TOKEN_SECRET }}
+
+      - name: Run requested kernel
+        if: steps.parse_comment.outputs.should_run == 'true'
+        id: benchmark
+        env:
+          KERNEL_PATH: ${{ steps.parse_comment.outputs.script_path }}
+          GPU_SELECTION: ${{ steps.parse_comment.outputs.gpu }}
+          PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.pr_info.outputs.head_sha }}
+        run: |
+          : > benchmark_results.md
+          echo "Kernel Benchmark Results" >> benchmark_results.md
+          echo "" >> benchmark_results.md
+          echo "PR #${PR_NUMBER} | Commit: ${HEAD_SHA}" >> benchmark_results.md
+          echo "Triggered by comment command." >> benchmark_results.md
+          echo "" >> benchmark_results.md
+
+          kernel_path="${KERNEL_PATH}"
+          gpu_choice="${GPU_SELECTION}"
+          GPU_OVERRIDE="${gpu_choice:-H100}"
+
+          if [ -z "${kernel_path}" ]; then
+            echo "No kernel path provided by command." >> benchmark_results.md
+            exit 1
+          fi
+
+          if [ ! -f "${kernel_path}" ]; then
+            echo "Requested kernel ${kernel_path} not found in repository." >> benchmark_results.md
+            exit 1
+          fi
+
+          echo "Requested kernel: ${kernel_path}" >> benchmark_results.md
+          echo "GPU target: ${GPU_OVERRIDE}" >> benchmark_results.md
+          echo "" >> benchmark_results.md
+
+          log_dir="benchmark_logs"
+          rm -rf "${log_dir}"
+          mkdir -p "${log_dir}"
+
+          run_kernel() {
+            local script_path=$1
+            local filename=$(basename "$script_path")
+            local safe_name=$(echo "$script_path" | tr '/' '_')
+            local log_file="${log_dir}/${safe_name}.txt"
+
+            echo "### ${filename}" >> benchmark_results.md
+            echo "" >> benchmark_results.md
+            echo '```' >> benchmark_results.md
+
+            if modal run modal_run.py --script "${script_path}" --gpu "${GPU_OVERRIDE}" --timeout 2 2>&1 | tee "${log_file}" | tee -a benchmark_results.md; then
+              echo '```' >> benchmark_results.md
+              echo "${filename} executed successfully on ${GPU_OVERRIDE}" >> benchmark_results.md
+            else
+              echo '```' >> benchmark_results.md
+              echo "${filename} failed to execute on ${GPU_OVERRIDE}" >> benchmark_results.md
+            fi
+
+            echo "" >> benchmark_results.md
+            echo "---" >> benchmark_results.md
+            echo "" >> benchmark_results.md
+          }
+
+          run_kernel "${kernel_path}"
+
+          echo "" >> benchmark_results.md
+          echo "GPU: ${GPU_OVERRIDE} | Modal Runtime | Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> benchmark_results.md
+
+      - name: Read benchmark results
+        if: steps.parse_comment.outputs.should_run == 'true'
+        id: read_results
+        run: |
+          encoded=$(python <<'PY'
+          import base64
+          from pathlib import Path
+          data = Path("benchmark_results.md").read_bytes()
+          print(base64.b64encode(data).decode("utf-8"))
+          PY
+          )
+          echo "benchmark_output_base64=${encoded}" >> "$GITHUB_OUTPUT"
+
+      - name: Comment PR with results
+        if: steps.parse_comment.outputs.should_run == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = Buffer.from(
+              process.env.BENCHMARK_OUTPUT_BASE64 ?? '',
+              'base64'
+            ).toString('utf8');
+
+            const prNumber = Number(process.env.PR_NUMBER ?? '0');
+            if (!prNumber) {
+              throw new Error('Unable to determine PR number.');
+            }
+
+            const body =
+              (typeof output === 'string' && output.trim().length > 0)
+                ? output
+                : "Kernel Benchmark Results\n\n(no benchmark output produced)";
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
+        env:
+          BENCHMARK_OUTPUT_BASE64: ${{ steps.read_results.outputs.benchmark_output_base64 }}
+          PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
+
+      - name: Upload benchmark results as artifact
+        if: steps.parse_comment.outputs.should_run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark_results.md
+          retention-days: 30
+
+      - name: No command found
+        if: steps.parse_comment.outputs.should_run != 'true'
+        run: echo 'Comment did not contain a run command; skipping.'
