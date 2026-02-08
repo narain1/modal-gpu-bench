@@ -22,11 +22,8 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const core = require('@actions/core');
             const body = (context.payload.comment?.body ?? '').trim();
 
-            // Supports: /run kernels/foo.py --gpu H100
-            // Also supports: run kernels/foo.py --gpu H100
             const match = body.match(/^\/?run\s+(\S+)(?:\s+--gpu\s+(\S+))?\s*$/i);
 
             if (!match) {
