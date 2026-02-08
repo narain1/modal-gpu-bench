@@ -2,17 +2,18 @@ name: Kernel Comment Run
 
 on:
   issue_comment:
-    types:
-      - created
+    types: [created]
 
 jobs:
   manual-benchmark:
+    # Only run on PR comments, only if commenter is narain1
     if: github.event.issue.pull_request && github.event.comment.user.login == 'narain1'
     runs-on: ubuntu-latest
 
     permissions:
-      pull-requests: write
       contents: read
+      pull-requests: read
+      issues: write
 
     steps:
       - name: Parse run command
@@ -22,8 +23,11 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const core = require('@actions/core');
-            const body = context.payload.comment?.body ?? '';
-            const match = body.match(/^run\s+(\S+)(?:\s+--gpu\s+(\S+))?/i);
+            const body = (context.payload.comment?.body ?? '').trim();
+
+            // Supports: /run kernels/foo.py --gpu H100
+            // Also supports: run kernels/foo.py --gpu H100
+            const match = body.match(/^\/?run\s+(\S+)(?:\s+--gpu\s+(\S+))?\s*$/i);
 
             if (!match) {
               core.info('No run command pattern found.');
@@ -54,9 +58,7 @@ jobs:
 
             core.setOutput('should_run', 'true');
             core.setOutput('script_path', scriptPath);
-            if (gpu) {
-              core.setOutput('gpu', gpu);
-            }
+            core.setOutput('gpu', gpu);
 
       - name: Gather PR metadata
         if: steps.parse_comment.outputs.should_run == 'true'
@@ -67,6 +69,7 @@ jobs:
           script: |
             const core = require('@actions/core');
             const prNumber = context.payload.issue.number;
+
             const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -76,12 +79,13 @@ jobs:
             core.setOutput('pr_number', String(prNumber));
             core.setOutput('head_sha', pr.head.sha);
 
-      - name: Checkout code
+      - name: Checkout PR code
         if: steps.parse_comment.outputs.should_run == 'true'
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ steps.pr_info.outputs.head_sha }}
+          # Most reliable for issue_comment-triggered workflows
+          ref: refs/pull/${{ steps.pr_info.outputs.pr_number }}/head
 
       - name: Set up Python
         if: steps.parse_comment.outputs.should_run == 'true'
@@ -116,6 +120,7 @@ jobs:
 
           kernel_path="${KERNEL_PATH}"
           gpu_choice="${GPU_SELECTION}"
+          GPU_OVERRIDE="${gpu_choice:-H100}"
 
           if [ -z "${kernel_path}" ]; then
             echo "No kernel path provided by command." >> benchmark_results.md
@@ -126,8 +131,6 @@ jobs:
             echo "Requested kernel ${kernel_path} not found in repository." >> benchmark_results.md
             exit 1
           fi
-
-          GPU_OVERRIDE="${gpu_choice:-H100}"
 
           echo "Requested kernel: ${kernel_path}" >> benchmark_results.md
           echo "GPU target: ${GPU_OVERRIDE}" >> benchmark_results.md
@@ -169,10 +172,16 @@ jobs:
         if: steps.parse_comment.outputs.should_run == 'true'
         id: read_results
         run: |
-          encoded=$(python -c "import base64, pathlib; print(base64.b64encode(pathlib.Path('benchmark_results.md').read_bytes()).decode('utf-8'))")
+          encoded=$(python <<'PY'
+          import base64
+          from pathlib import Path
+          data = Path("benchmark_results.md").read_bytes()
+          print(base64.b64encode(data).decode("utf-8"))
+          PY
+          )
           echo "benchmark_output_base64=${encoded}" >> "$GITHUB_OUTPUT"
 
-      - name: Comment PR with results
+      - name: Comment PR with results (create or update bot comment)
         if: steps.parse_comment.outputs.should_run == 'true'
         uses: actions/github-script@v7
         with:
@@ -181,23 +190,41 @@ jobs:
             const output = Buffer.from(process.env.BENCHMARK_OUTPUT_BASE64 ?? '', 'base64').toString('utf8');
             const prNumber = Number(process.env.PR_NUMBER ?? '0');
 
-            if (!prNumber) {
-              throw new Error('Unable to determine PR number for comment update.');
-            }
-
-            await github.rest.issues.createComment({
+            const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: prNumber,
-              body: output,
             });
+
+            const botComment = comments.find(c =>
+              c.user?.type === 'Bot' &&
+              typeof c.body === 'string' &&
+              c.body.includes('Kernel Benchmark Results')
+            );
+
+            const commentBody =
+              (typeof output === 'string' && output.trim().length > 0)
+                ? output
+                : "Kernel Benchmark Results\n\n(no benchmark output produced)";
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: commentBody,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: commentBody,
+              });
+            }
         env:
           BENCHMARK_OUTPUT_BASE64: ${{ steps.read_results.outputs.benchmark_output_base64 }}
           PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
-
-      - name: Ensure benchmark_results.md exists
-        if: steps.parse_comment.outputs.should_run == 'true'
-        run: '[ -f benchmark_results.md ] || touch benchmark_results.md'
 
       - name: Upload benchmark results as artifact
         if: steps.parse_comment.outputs.should_run == 'true'
