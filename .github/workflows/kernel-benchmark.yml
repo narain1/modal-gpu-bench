@@ -98,18 +98,22 @@ jobs:
       - name: Read benchmark results
         id: read_results
         run: |
-          {
-            echo 'benchmark_output<<EOF'
-            cat benchmark_results.md
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
+          encoded=$(python - <<'PY'
+import base64
+from pathlib import Path
+
+data = Path("benchmark_results.md").read_bytes()
+print(base64.b64encode(data).decode("utf-8"))
+PY
+          )
+          echo "benchmark_output_base64=${encoded}" >> "$GITHUB_OUTPUT"
       
       - name: Comment PR with results
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const output = `${{ steps.read_results.outputs.benchmark_output }}`;
+            const output = Buffer.from(process.env.BENCHMARK_OUTPUT_BASE64 ?? '', 'base64').toString('utf8');
             const prNumber = context.payload.pull_request.number;
 
             const { data: comments } = await github.rest.issues.listComments({
@@ -144,6 +148,8 @@ jobs:
                 body: commentBody,
               });
             }
+        env:
+          BENCHMARK_OUTPUT_BASE64: ${{ steps.read_results.outputs.benchmark_output_base64 }}
       
       - name: Ensure benchmark_results.md exists
         run: '[ -f benchmark_results.md ] || touch benchmark_results.md'
