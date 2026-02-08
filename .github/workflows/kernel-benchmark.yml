@@ -1,0 +1,158 @@
+name: Kernel Benchmark with NCU
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  benchmark:
+    # Only run for PRs from narain1 user
+    if: github.event.pull_request.user.login == 'narain1'
+    runs-on: ubuntu-latest
+    
+    permissions:
+      pull-requests: write
+      contents: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install modal torch numpy triton ninja
+      
+      - name: Set Modal token
+        run: |
+          modal token set --token-id ${{ secrets.MODAL_TOKEN_ID }} --token-secret ${{ secrets.MODAL_TOKEN_SECRET }}
+      
+      - name: Run kernel benchmarks with NCU
+        id: benchmark
+        run: |
+          echo "## 🚀 Kernel Benchmark Results" > benchmark_results.md
+          echo "" >> benchmark_results.md
+          echo "**PR #${{ github.event.pull_request.number }}** | **Commit:** \`${{ github.event.pull_request.head.sha }}\`" >> benchmark_results.md
+          echo "" >> benchmark_results.md
+          
+          # Function to run and benchmark a kernel
+          run_kernel() {
+            local kernel_name=$1
+            local script_path=$2
+            
+            echo "### 📊 ${kernel_name}" >> benchmark_results.md
+            echo "" >> benchmark_results.md
+            
+            # Run the kernel on Modal
+            echo "Running ${kernel_name}..." >> benchmark_results.md
+            echo '```' >> benchmark_results.md
+            
+            if modal run modal_run.py --script "${script_path}" --gpu "H100" --timeout 5 > kernel_output.txt 2>&1; then
+              cat kernel_output.txt >> benchmark_results.md
+              echo '```' >> benchmark_results.md
+              echo "✅ ${kernel_name} executed successfully" >> benchmark_results.md
+            else
+              cat kernel_output.txt >> benchmark_results.md
+              echo '```' >> benchmark_results.md
+              echo "❌ ${kernel_name} failed to execute" >> benchmark_results.md
+            fi
+            
+            echo "" >> benchmark_results.md
+            echo "---" >> benchmark_results.md
+            echo "" >> benchmark_results.md
+          }
+          
+          # Benchmark each kernel
+          echo "### 🔍 Kernels Tested" >> benchmark_results.md
+          echo "" >> benchmark_results.md
+          
+          # Test CUDA vector add
+          if [ -f "kernels/cuda_vector_add.py" ]; then
+            run_kernel "CUDA Vector Add" "cuda_vector_add.py"
+          fi
+          
+          # Test CuTe vector add
+          if [ -f "kernels/cute_vector_add.py" ]; then
+            run_kernel "CuTe Vector Add" "cute_vector_add.py"
+          fi
+          
+          # Test CuTe ReLU
+          if [ -f "kernels/cute_relu.py" ]; then
+            run_kernel "CuTe ReLU" "cute_relu.py"
+          fi
+          
+          # Test CuTe RMS Norm
+          if [ -f "kernels/cute_rms_norm.py" ]; then
+            run_kernel "CuTe RMS Norm" "cute_rms_norm.py"
+          fi
+          
+          # Test CuTe Softmax
+          if [ -f "kernels/cute_softmax.py" ]; then
+            run_kernel "CuTe Softmax" "cute_softmax.py"
+          fi
+          
+          echo "" >> benchmark_results.md
+          echo "---" >> benchmark_results.md
+          echo "" >> benchmark_results.md
+          echo "**GPU:** H100 | **Modal Runtime** | **Timestamp:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> benchmark_results.md
+      
+      - name: Read benchmark results
+        id: read_results
+        run: |
+          {
+            echo 'benchmark_output<<EOF'
+            cat benchmark_results.md
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+      
+      - name: Comment PR with results
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `${{ steps.read_results.outputs.benchmark_output }}`;
+            
+            // Check if there's already a benchmark comment
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.data.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('🚀 Kernel Benchmark Results')
+            );
+            
+            const commentBody = output;
+            
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: commentBody
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }
+      
+      - name: Upload benchmark results as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: benchmark_results.md
+          retention-days: 30
