@@ -36,9 +36,10 @@ jobs:
       - name: Run kernel benchmarks
         id: benchmark
         run: |
-          echo "## 🚀 Kernel Benchmark Results" > benchmark_results.md
+          : > benchmark_results.md
+          echo "Kernel Benchmark Results" >> benchmark_results.md
           echo "" >> benchmark_results.md
-          echo "**PR #${{ github.event.pull_request.number }}** | **Commit:** \`${{ github.event.pull_request.head.sha }}\`" >> benchmark_results.md
+          echo "PR #${{ github.event.pull_request.number }} | Commit: ${{ github.event.pull_request.head.sha }}" >> benchmark_results.md
           echo "" >> benchmark_results.md
           
           # Get changed files in kernels directory
@@ -51,26 +52,30 @@ jobs:
             exit 0
           fi
           
-          echo "### 🔍 Kernels Tested" >> benchmark_results.md
+          echo "Kernels Tested" >> benchmark_results.md
           echo "" >> benchmark_results.md
+
+          log_dir="benchmark_logs"
+          rm -rf "$log_dir"
+          mkdir -p "$log_dir"
           
           # Function to run and benchmark a kernel
           run_kernel() {
             local script_path=$1
             local filename=$(basename "$script_path")
-            
-            echo "### 📊 ${filename}" >> benchmark_results.md
+            local safe_name=$(echo "$script_path" | tr '/' '_')
+            local log_file="$log_dir/${safe_name}.txt"
+
+            echo "### ${filename}" >> benchmark_results.md
             echo "" >> benchmark_results.md
             echo '```' >> benchmark_results.md
-            
-            if modal run modal_run.py --script "${script_path}" --gpu "H100" --timeout 2 > kernel_output.txt 2>&1; then
-              cat kernel_output.txt >> benchmark_results.md
+
+            if modal run modal_run.py --script "${script_path}" --gpu "H100" --timeout 2 2>&1 | tee "${log_file}" | tee -a benchmark_results.md; then
               echo '```' >> benchmark_results.md
-              echo "✅ ${filename} executed successfully" >> benchmark_results.md
+              echo "${filename} executed successfully" >> benchmark_results.md
             else
-              cat kernel_output.txt >> benchmark_results.md
               echo '```' >> benchmark_results.md
-              echo "❌ ${filename} failed to execute" >> benchmark_results.md
+              echo "${filename} failed to execute" >> benchmark_results.md
             fi
             
             echo "" >> benchmark_results.md
@@ -86,7 +91,7 @@ jobs:
           done
           
           echo "" >> benchmark_results.md
-          echo "**GPU:** H100 | **Modal Runtime** | **Timestamp:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> benchmark_results.md
+          echo "GPU: H100 | Modal Runtime | Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> benchmark_results.md
       
       - name: Read benchmark results
         id: read_results
@@ -114,13 +119,13 @@ jobs:
             const botComment = comments.find(c =>
               c.user?.type === 'Bot' &&
               typeof c.body === 'string' &&
-              c.body.includes('🚀 Kernel Benchmark Results')
+              c.body.includes('Kernel Benchmark Results')
             );
 
             const commentBody =
               (typeof output === 'string' && output.trim().length > 0)
                 ? output
-                : "🚀 Kernel Benchmark Results\n\n(no benchmark output produced)";
+                : "Kernel Benchmark Results\n\n(no benchmark output produced)";
 
             if (botComment) {
               await github.rest.issues.updateComment({
