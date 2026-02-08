@@ -43,7 +43,9 @@ jobs:
           echo "" >> benchmark_results.md
           
           # Get changed files in kernels directory
-          git fetch --unshallow
+          if git rev-parse --is-shallow-repository 2>/dev/null | grep -q true; then
+            git fetch --unshallow
+          fi
           git fetch origin main
           changed_files=$(git diff --name-only --diff-filter=AM origin/main...HEAD | grep '^kernels/' | grep -E '\.(py|cu)$' || true)
           
