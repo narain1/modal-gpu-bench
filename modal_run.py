@@ -51,7 +51,7 @@ def main(script: str = DEFAULT_SCRIPT, gpu: str = DEFAULT_GPU, timeout: int = DE
 
     Example:
         modal run run_rms_norm.py --script rms_norm.py --gpu H100 --timeout 10
-        modal run run_rms_norm.py --script reduction_cute.py --gpu A100 --timeout 5
+        modal run run_rms_norm.py --script cuda_vector_add.py --gpu A100 --timeout 5
         modal run run_rms_norm.py  # defaults: rms_norm.py, H100, 10min
     """
     if not os.path.exists(script):

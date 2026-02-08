@@ -1,4 +1,4 @@
-name: Kernel Benchmark with NCU
+name: Kernel Benchmark
 
 on:
   pull_request:
@@ -24,15 +24,14 @@ jobs:
         with:
           python-version: '3.11'
       
-      - name: Install dependencies
-        run: |
-          pip install modal torch numpy triton ninja
+      - name: Install Modal CLI
+        run: pip install modal
       
       - name: Set Modal token
         run: |
           modal token set --token-id ${{ secrets.MODAL_TOKEN_ID }} --token-secret ${{ secrets.MODAL_TOKEN_SECRET }}
       
-      - name: Run kernel benchmarks with NCU
+      - name: Run kernel benchmarks
         id: benchmark
         run: |
           echo "## 🚀 Kernel Benchmark Results" > benchmark_results.md
@@ -47,12 +46,9 @@ jobs:
             
             echo "### 📊 ${kernel_name}" >> benchmark_results.md
             echo "" >> benchmark_results.md
-            
-            # Run the kernel on Modal
-            echo "Running ${kernel_name}..." >> benchmark_results.md
             echo '```' >> benchmark_results.md
             
-            if modal run modal_run.py --script "${script_path}" --gpu "H100" --timeout 5 > kernel_output.txt 2>&1; then
+            if modal run modal_run.py --script "kernels/${script_path}" --gpu "H100" --timeout 5 > kernel_output.txt 2>&1; then
               cat kernel_output.txt >> benchmark_results.md
               echo '```' >> benchmark_results.md
               echo "✅ ${kernel_name} executed successfully" >> benchmark_results.md
@@ -67,31 +63,36 @@ jobs:
             echo "" >> benchmark_results.md
           }
           
-          # Benchmark each kernel
           echo "### 🔍 Kernels Tested" >> benchmark_results.md
           echo "" >> benchmark_results.md
           
-          # Test CUDA vector add
+          # Test CUDA .py kernels
           if [ -f "kernels/cuda_vector_add.py" ]; then
-            run_kernel "CUDA Vector Add" "cuda_vector_add.py"
+            run_kernel "CUDA Vector Add (Python)" "cuda_vector_add.py"
           fi
           
-          # Test CuTe vector add
+          # Test .cu kernels
+          if [ -f "kernels/test_vector_add.cu" ]; then
+            run_kernel "CUDA Vector Add (.cu)" "test_vector_add.cu"
+          fi
+          
+          if [ -f "kernels/reduction1.cu" ]; then
+            run_kernel "CUDA Reduction (.cu)" "reduction1.cu"
+          fi
+          
+          # Test CuTe kernels
           if [ -f "kernels/cute_vector_add.py" ]; then
             run_kernel "CuTe Vector Add" "cute_vector_add.py"
           fi
           
-          # Test CuTe ReLU
           if [ -f "kernels/cute_relu.py" ]; then
             run_kernel "CuTe ReLU" "cute_relu.py"
           fi
           
-          # Test CuTe RMS Norm
           if [ -f "kernels/cute_rms_norm.py" ]; then
             run_kernel "CuTe RMS Norm" "cute_rms_norm.py"
           fi
           
-          # Test CuTe Softmax
           if [ -f "kernels/cute_softmax.py" ]; then
             run_kernel "CuTe Softmax" "cute_softmax.py"
           fi
