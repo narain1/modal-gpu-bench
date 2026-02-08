@@ -39,23 +39,35 @@ jobs:
           echo "**PR #${{ github.event.pull_request.number }}** | **Commit:** \`${{ github.event.pull_request.head.sha }}\`" >> benchmark_results.md
           echo "" >> benchmark_results.md
           
+          # Get changed files in kernels directory
+          git fetch origin main
+          changed_files=$(git diff --name-only --diff-filter=AM origin/main...HEAD | grep '^kernels/' | grep -E '\.(py|cu)$' || true)
+          
+          if [ -z "$changed_files" ]; then
+            echo "No kernel files were modified in this PR." >> benchmark_results.md
+            exit 0
+          fi
+          
+          echo "### 🔍 Kernels Tested" >> benchmark_results.md
+          echo "" >> benchmark_results.md
+          
           # Function to run and benchmark a kernel
           run_kernel() {
-            local kernel_name=$1
-            local script_path=$2
+            local script_path=$1
+            local filename=$(basename "$script_path")
             
-            echo "### 📊 ${kernel_name}" >> benchmark_results.md
+            echo "### 📊 ${filename}" >> benchmark_results.md
             echo "" >> benchmark_results.md
             echo '```' >> benchmark_results.md
             
-            if modal run modal_run.py --script "kernels/${script_path}" --gpu "H100" --timeout 5 > kernel_output.txt 2>&1; then
+            if modal run modal_run.py --script "${script_path}" --gpu "H100" --timeout 2 > kernel_output.txt 2>&1; then
               cat kernel_output.txt >> benchmark_results.md
               echo '```' >> benchmark_results.md
-              echo "✅ ${kernel_name} executed successfully" >> benchmark_results.md
+              echo "✅ ${filename} executed successfully" >> benchmark_results.md
             else
               cat kernel_output.txt >> benchmark_results.md
               echo '```' >> benchmark_results.md
-              echo "❌ ${kernel_name} failed to execute" >> benchmark_results.md
+              echo "❌ ${filename} failed to execute" >> benchmark_results.md
             fi
             
             echo "" >> benchmark_results.md
@@ -63,42 +75,13 @@ jobs:
             echo "" >> benchmark_results.md
           }
           
-          echo "### 🔍 Kernels Tested" >> benchmark_results.md
-          echo "" >> benchmark_results.md
+          # Run benchmark for each changed kernel file
+          for file in $changed_files; do
+            if [ -f "$file" ]; then
+              run_kernel "$file"
+            fi
+          done
           
-          # Test CUDA .py kernels
-          if [ -f "kernels/cuda_vector_add.py" ]; then
-            run_kernel "CUDA Vector Add (Python)" "cuda_vector_add.py"
-          fi
-          
-          # Test .cu kernels
-          if [ -f "kernels/test_vector_add.cu" ]; then
-            run_kernel "CUDA Vector Add (.cu)" "test_vector_add.cu"
-          fi
-          
-          if [ -f "kernels/reduction1.cu" ]; then
-            run_kernel "CUDA Reduction (.cu)" "reduction1.cu"
-          fi
-          
-          # Test CuTe kernels
-          if [ -f "kernels/cute_vector_add.py" ]; then
-            run_kernel "CuTe Vector Add" "cute_vector_add.py"
-          fi
-          
-          if [ -f "kernels/cute_relu.py" ]; then
-            run_kernel "CuTe ReLU" "cute_relu.py"
-          fi
-          
-          if [ -f "kernels/cute_rms_norm.py" ]; then
-            run_kernel "CuTe RMS Norm" "cute_rms_norm.py"
-          fi
-          
-          if [ -f "kernels/cute_softmax.py" ]; then
-            run_kernel "CuTe Softmax" "cute_softmax.py"
-          fi
-          
-          echo "" >> benchmark_results.md
-          echo "---" >> benchmark_results.md
           echo "" >> benchmark_results.md
           echo "**GPU:** H100 | **Modal Runtime** | **Timestamp:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> benchmark_results.md
       
