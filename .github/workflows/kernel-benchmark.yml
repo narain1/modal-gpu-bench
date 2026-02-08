@@ -40,6 +40,7 @@ jobs:
           echo "" >> benchmark_results.md
           
           # Get changed files in kernels directory
+          git fetch --unshallow
           git fetch origin main
           changed_files=$(git diff --name-only --diff-filter=AM origin/main...HEAD | grep '^kernels/' | grep -E '\.(py|cu)$' || true)
           
@@ -91,7 +92,7 @@ jobs:
           {
             echo 'benchmark_output<<EOF'
             cat benchmark_results.md
-            echo EOF
+            echo 'EOF'
           } >> "$GITHUB_OUTPUT"
       
       - name: Comment PR with results
@@ -99,7 +100,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const output = `${{ steps.read_results.outputs.benchmark_output }}`;
+            const output = process.env.benchmark_output;
             
             // Check if there's already a benchmark comment
             const comments = await github.rest.issues.listComments({
