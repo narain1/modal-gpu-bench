@@ -4,7 +4,7 @@
 #include <cmath>
 #include <algorithm>
 
-__inline__ void initialize_random_normal(float *data, size_t n) {
+void initialize_random_normal(float *data, size_t n) {
     std::mt19937 generator(42);
     std::normal_distribution<float> distribution(0.0f, 1.0f);
     for (size_t i = 0; i < n; ++i) {
@@ -36,22 +36,27 @@ __device__ __forceinline__ float block_reduce_sum(float v) {
 }
 
 
-
 template <unsigned int threads_per_block>
-__global__ void reduction_kernel3(float *inp, float *out, const size_t N) {
+__global__ void reduction_kernel3(const float* inp, float* out, const size_t N) {
+    const float4 *inp4 = reinterpret_cast<const float4*>(inp);
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
     int tid = threadIdx.x;
     float sum = 0.0f;
 
-    for (size_t i = idx; i < N; i += stride) {
+    for (size_t i = idx; i < N >> 2; i += stride) {
+        float4 val = inp4[i];
+        sum += val.x + val.y + val.z + val.w;
+    }
+
+    for (size_t i = (N & ~3) + idx; i < N; i += stride) {
         sum += inp[i];
     }
 
     sum = block_reduce_sum(sum);
 
     if (tid == 0) {
-        out[blockIdx.x] = sum;
+        atomicAdd(&out[0], sum);
     }
     
 }
@@ -70,11 +75,7 @@ void verify_reduction(float *input, float *output, const size_t n) {
 void launch_reduction(float *input, float *output, const size_t n) {
     constexpr int threads_per_block = 512;
     size_t numBlocks = (n + threads_per_block - 1) / threads_per_block;
-    float *d_int;
-    cudaMalloc(&d_int, numBlocks * sizeof(float));
-    reduction_kernel3<threads_per_block><<<numBlocks, threads_per_block>>>(input, d_int, n);
-    reduction_kernel3<threads_per_block><<<1, threads_per_block>>>(d_int, output, numBlocks);
-    cudaFree(d_int);
+    reduction_kernel3<threads_per_block><<<numBlocks, threads_per_block>>>(input, output, n);
 }
 
 int main() {
@@ -117,6 +118,8 @@ int main() {
     double bandwidth = bytes / (milliseconds / 100.0 / 1e3) / 1e9;
     printf("Bandwidth: %f GB/s\n", bandwidth);
 
+    cudaMemset(d_out, 0, sizeof(float));
+    launch_reduction(d_in, d_out, N);
     cudaMemcpy(h_out, d_out, sizeof(float), cudaMemcpyDeviceToHost);
 
     printf("the sum is %f\n", h_out[0]);
