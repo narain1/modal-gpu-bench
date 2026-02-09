@@ -78,7 +78,7 @@ void launch_reduction(float *input, float *output, const size_t n) {
 }
 
 int main() {
-    size_t N = 1 << 30;
+    size_t N = 1 << 24;
     float *h_in, *h_out;
     float *d_in, *d_out;
 
