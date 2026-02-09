@@ -57,8 +57,20 @@ void verify_reduction(float *input, float *output, size_t n) {
     printf("GPU Sum: %f\n", *output);
 }
 
+
+void launch_reduction(float *input, float *output, const size_t n) {
+    constexpr int threads_per_block = 512;
+    size_t numBlocks = (n + threads_per_block - 1) / threads_per_block;
+    float *d_int;
+    cudaMalloc(&d_int, numBlocks * sizeof(float));
+    reduction_kernel2<threads_per_block><<<numBlocks, threads_per_block>>>(input, d_int, n);
+    reduction_kernel2<threads_per_block><<<1, threads_per_block>>>(d_int, output, numBlocks);
+    cudaFree(d_int);
+}
+
+
 int main() {
-    size_t N = 1 << 16;
+    size_t N = 1 << 24;
     float *h_in, *h_out;
     float *d_in, *d_int, *d_out;
 
@@ -74,13 +86,37 @@ int main() {
 
     cudaMemcpy(d_in, h_in, N * sizeof(float), cudaMemcpyHostToDevice);
 
-    reduction_kernel2<threads_per_block><<<block_dim, threads_per_block>>>(d_in, d_int, N);
-    reduction_kernel2<threads_per_block><<<1, threads_per_block>>>(d_int, d_out, block_dim);
+    // warmup
+    for (int i = 0; i < 10; ++i) {
+        launch_reduction(d_in, d_out, N);
+    }
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
+    for (int i = 0; i < 100; ++i) {
+        launch_reduction(d_in, d_out, N);
+    }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+
+    cudaMemset(d_out, 0, sizeof(float));
+    launch_reduction(d_in, d_out, N);
     cudaMemcpy(h_out, d_out, sizeof(float), cudaMemcpyDeviceToHost);
 
     printf("the sum is %f\n", h_out[0]);
     verify_reduction(h_in, h_out, N);
 
+    double tflops = static_cast<double>(N) * 2.0 / (
+        milliseconds / 100.0 / 1e3) / 1e12;
+    printf("TFLOPS: %f\n", tflops);
+
+    double bytes = double(N) * sizeof(float);
+    double bandwidth = bytes / (milliseconds / 100.0 / 1e3) / 1e9;
+    printf("Bandwidth: %f GB/s\n", bandwidth);
 
     cudaFree(d_in);
     cudaFree(d_int);
