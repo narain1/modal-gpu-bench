@@ -34,6 +34,9 @@ image = (
         "triton",
         "ninja",
     )
+    .run_commands(
+        "git clone --depth 1 https://github.com/NVIDIA/cutlass.git /opt/cutlass",
+    )
     .add_local_dir("kernels/", remote_path="/root/scripts")
 )
 
@@ -106,7 +109,32 @@ def compile_and_run_cuda(cuda_file: str, gpu: str, nvcc_args: list[str] = None):
     print(f"Compiling CUDA file: {cuda_file}")
     # print(f"Output binary: {output_binary}")
 
-    nvcc_cmd = ["nvcc", cuda_file, "-o", output_binary] + nvcc_args
+    arch_map = {
+        "T4": "sm_75",
+        "L4": "sm_89",
+        "A10": "sm_86",
+        "A100": "sm_80",
+        "A100-40GB": "sm_80",
+        "A100-80GB": "sm_80",
+        "L40S": "sm_89",
+        "H100": "sm_90a",
+        "H200": "sm_90a",
+        "B200": "sm_100",
+    }
+
+    target_arch = arch_map.get(gpu, "sm_80")
+
+    nvcc_cmd = [
+        "nvcc",
+        cuda_file,
+        "-I/opt/cutlass/include",
+        "-I/opt/cutlass/tools/util/include",
+        "-std=c++17",
+        "-O3",
+        f"-arch={target_arch}",
+        "-o",
+        output_binary,
+    ] + nvcc_args
 
     try:
         result = subprocess.run(nvcc_cmd, capture_output=True, text=True)
