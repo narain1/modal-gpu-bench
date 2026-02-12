@@ -34,7 +34,7 @@ image = (
         "triton",
         "ninja",
     )
-    .add_local_dir("kernels/", remote_path="/root/scripts")
+    .add_local_dir(".", remote_path="/root/scripts")
 )
 
 app = modal.App("cute-reduction")
@@ -58,9 +58,13 @@ def main(script: str = DEFAULT_SCRIPT, gpu: str = DEFAULT_GPU, timeout: int = DE
         print(f"Error: Script '{script}' not found")
         sys.exit(1)
 
-    script_name = os.path.basename(script)
-    print(f"Configuring Modal: script={script_name}, GPU={gpu}, timeout={timeout}min")
-    execute.remote(script_name, gpu, timeout)
+    try:
+        script_rel = os.path.relpath(os.path.abspath(script), os.getcwd())
+    except ValueError: 
+        script_rel = script
+
+    print(f"Configuring Modal: script={script_rel}, GPU={gpu}, timeout={timeout}min")
+    execute.remote(script_rel, gpu, timeout)
 
 @app.function(
     image=image,
@@ -72,20 +76,32 @@ def execute(script: str, gpu: str, timeout: int):
     import os
     from pathlib import Path
 
-    script_name = os.path.basename(script)
-    file_ext = Path(script_name).suffix.lower()
+    script_path = script
+    file_ext = Path(script_path).suffix.lower()
 
-    print(f"Executing {script_name} with GPU={gpu}, timeout={timeout}min")
+    print(f"Executing {script_path} with GPU={gpu}, timeout={timeout}min")
 
     os.environ['GPU'] = gpu
     os.environ['TIMEOUT'] = str(timeout * 60)
 
     os.chdir("/root/scripts")
 
+    nvcc_flags = ["-O3"]
+    if gpu.upper().startswith("H100") or gpu.upper().startswith("H200") or gpu.upper().startswith("B200"):
+        nvcc_flags.append("-arch=sm_90")
+    elif gpu.upper().startswith("A100"):
+        nvcc_flags.append("-arch=sm_80")
+    elif gpu.upper().startswith("T4"):
+        nvcc_flags.append("-arch=sm_75")
+    elif gpu.upper().startswith("L4") or gpu.upper().startswith("L40"):
+        nvcc_flags.append("-arch=sm_89")
+    elif gpu.upper().startswith("A10"):
+        nvcc_flags.append("-arch=sm_86")
+    
     if file_ext == ".cu":
-        result = compile_and_run_cuda(script_name, gpu)
+        result = compile_and_run_cuda(script_path, gpu, nvcc_args=nvcc_flags)
     else:  # .py files
-        result = os.system(f"python {script_name}")
+        result = os.system(f"python {script_path}")
 
     if result != 0:
         print(f"Script exited with code {result}")

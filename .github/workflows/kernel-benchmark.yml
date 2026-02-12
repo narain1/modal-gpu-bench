@@ -47,7 +47,7 @@ jobs:
             git fetch --unshallow
           fi
           git fetch origin main
-          changed_files=$(git diff --name-only --diff-filter=AM origin/main...HEAD | grep '^kernels/' | grep -E '\.(py|cu)$' || true)
+          changed_files=$(git diff --name-only --diff-filter=AM origin/main...HEAD | grep -E '\.(py|cu)$' | grep -v 'modal_run.py' || true)
           
           if [ -z "$changed_files" ]; then
             echo "No kernel files were modified in this PR." >> benchmark_results.md
