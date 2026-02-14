@@ -22,9 +22,12 @@ __global__ void matrix_multiply_kernel(const float *a, const float *b, float *c,
     if (x < m && y < n) {
         float tmp = 0.0f;
         for (int i = 0; i < k; ++i) {
-            tmp += a[x * k + i] * b[i * n + y];
+            float _a, _b;
+            asm volatile("ld.global.f32 %0, [%1];" : "=f"(_a) : "l"(a + x * k + i));
+            asm volatile("ld.global.f32 %0, [%1];" : "=f"(_b) : "l"(b + i * n + y));
+            asm("fma.rn.f32 %0, %1, %2, %0;" : "+f"(tmp) : "f"(_a), "f"(_b));
         }
-        c[x * n + y] = tmp;
+        asm volatile("st.global.f32 [%0], %1;" :: "l"(c + x * n + y), "f"(tmp));
     }
 }
 
@@ -32,7 +35,10 @@ __global__ void matrix_multiply_kernel(const float *a, const float *b, float *c,
 __global__ void compute_abs_diff(const float *a, const float *b, float *diff, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
-        diff[idx] = fabsf(a[idx] - b[idx]);
+        float _a, _b;
+        asm volatile("ld.global.f32 %0, [%1];" : "=f"(_a) : "l"(a + idx));
+        asm volatile("ld.global.f32 %0, [%1];" : "=f"(_b) : "l"(b + idx));
+        asm volatile("st.global.f32 [%0], %1;" :: "l"(diff + idx), "f"(fabsf(_a - _b)));
     }
 }
 
