@@ -4,8 +4,6 @@
 #include <random>
 #include <iostream>
 
-#define BLOCKSIZE 16
-
 void initialize_random_normal(float *data, size_t n) {
     std::mt19937 generator(42);
     std::normal_distribution<float> distribution(0.0f, 1.0f);
@@ -16,13 +14,13 @@ void initialize_random_normal(float *data, size_t n) {
 
 
 __global__ void matrix_multiply_kernel(const float *a, const float *b, float *c, int m, int n, int k) {
-    const int x = blockIdx.x * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
-    const int y = blockIdx.y * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (x < m && y < n) {
         float tmp = 0.0f;
         for (int i = 0; i < k; ++i) {
-            tmp += a[x * k + i] * b[i * n + y];
+            tmp = fmaf(a[y * k + i], b[i * n + x], tmp); // tmp += a[x * k + i] * b[i * n + y];
         }
         c[x * n + y] = tmp;
     }
@@ -38,7 +36,7 @@ __global__ void compute_abs_diff(const float *a, const float *b, float *diff, in
 
 
 int main() {
-    int m = 4096, n = 4096, k = 4096;
+    int m = 1024, n = 1024, k = 1024;
     float *A, *B;
     float *d_A, *d_B, *d_C;
     size_t size_A = m * k * sizeof(float);
@@ -57,9 +55,9 @@ int main() {
     cudaMemcpy(d_B, B, size_B, cudaMemcpyHostToDevice);
     cudaMemset(d_C, 0, size_C);
 
-    dim3 threadsPerBlock(BLOCKSIZE * BLOCKSIZE);
-    dim3 numBlocks((m + BLOCKSIZE - 1) / BLOCKSIZE,
-                   (n + BLOCKSIZE - 1) / BLOCKSIZE);
+    dim3 threadsPerBlock(16, 16);
+    dim3 numBlocks((m + threadsPerBlock.x - 1) / threadsPerBlock.x,
+                   (n + threadsPerBlock.y - 1) / threadsPerBlock.y);
     for (int i = 0; i < 10; ++i) {
         matrix_multiply_kernel<<<numBlocks, threadsPerBlock>>>(d_A, d_B, d_C, m, n, k);
     }
@@ -74,12 +72,16 @@ int main() {
     cudaEventSynchronize(stop);
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
-    printf("Average time for matrix multiplication: %f ms\n", milliseconds / 100.0);
-    double tflops = static_cast<double>(2) * m * n * k / (milliseconds / 100.0 / 1e3) / 1e12;
-    printf("TFLOPS: %f\n", tflops);
-    double bytes = (double(m)*k + double(k)*n + double(m)*n) * sizeof(float);
-    double bandwidth = bytes / (milliseconds / 100.0 / 1e3) / 1e9;
-    printf("Bandwidth: %f GB/s\n", bandwidth);
+
+    float avg_ms = milliseconds / 100.0f;
+    printf("Average time per SGEMM: %.6f ms\n", avg_ms);
+
+    double bytes = (double)(m * k + n * k + m * n) * sizeof(float);
+    double bandwidth = bytes / (avg_ms * 1e-3) / 1e9;
+
+    printf("Bandwidth: %.6f GB/s\n", bandwidth);
+    double tflops = static_cast<double>(2) * m * n * k / (avg_ms * 1e-3) / 1e12;
+    printf("TFLOPS: %.6f\n", tflops);
 
     // Verify with cuBLAS
     cublasHandle_t handle;
@@ -88,8 +90,6 @@ int main() {
     cudaMalloc(&d_C_ref, size_C);
     cudaMemset(d_C_ref, 0, size_C);
     
-    // cuBLAS uses column-major order, so we compute C^T = B^T * A^T
-    // which is equivalent to C = A * B in row-major
     const float alpha = 1.0f;
     const float beta = 0.0f;
     cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, 

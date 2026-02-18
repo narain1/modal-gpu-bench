@@ -52,12 +52,15 @@ int main() {
     cudaEventSynchronize(stop);
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
-    printf("Average time for matrix multiplication: %f ms\n", milliseconds / 100.0);
-    double tflops = static_cast<double>(2) * m * n * k / (milliseconds / 100.0 / 1e3) / 1e12;
-    printf("TFLOPS: %f\n", tflops);
-    double bytes_min = (double(m)*k + double(k)*n + double(m)*n) * sizeof(float);
-    double bandwidth_min = bytes_min / (milliseconds / 100.0 / 1e3) / 1e9;
-    printf("Bandwidth: %f GB/s\n", bandwidth_min);
+    float avg_ms = milliseconds / 100.0f;
+    printf("Average time per SGEMM: %.6f ms\n", avg_ms);
+
+    double bytes = (double)(m * k + n * k + m * n) * sizeof(float);
+    double bandwidth = bytes / (avg_ms * 1e-3) / 1e9;
+
+    printf("Bandwidth: %.6f GB/s\n", bandwidth);
+    double tflops = static_cast<double>(2) * m * n * k / (avg_ms * 1e-3) / 1e12;
+    printf("TFLOPS: %.6f\n", tflops);
 
     cublasDestroy(handle);
     cudaFree(d_A);
