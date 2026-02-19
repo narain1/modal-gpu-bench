@@ -1,8 +1,8 @@
 #include <cuda_runtime.h>
-#include <cublas_v2.h>
-#include <cub/cub.cuh>
 #include <random>
 #include <iostream>
+#include <cublas_v2.h>
+#include <cub/cub.cuh>
 
 void initialize_random_normal(float *data, size_t n) {
     std::mt19937 generator(42);
@@ -13,17 +13,48 @@ void initialize_random_normal(float *data, size_t n) {
 }
 
 
-// naive matrix multiplication kernel
-__global__ void matrix_multiply_kernel(const float *a, const float *b, float *c, int m, int n, int k) {
-    const int x = blockIdx.x * blockDim.x + threadIdx.x;
-    const int y = blockIdx.y * blockDim.y + threadIdx.y;
-
-    if (x < m && y < n) {
-        float tmp = 0.0f;
-        for (int i = 0; i < k; ++i) {
-            tmp = fmaf(a[x * k + i], b[i * n + y], tmp); // tmp += a[x * k + i] * b[i * n + y];
+template<const int bm, const int bn, const int bk>
+__global__ void matrix_multiply(const float *A, const float *B, float *C, int M, int N, int K) {
+    __shared__ float As[bm][bk];
+    __shared__ float Bs[bk][bn];
+    
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    
+    int row = by * bm + ty;
+    int col = bx * bn + tx;
+    
+    float sum = 0.0f;
+    
+    int numTiles = (K + bk - 1) / bk;
+    
+    for (int t = 0; t < numTiles; ++t) {
+        // Each thread loads one element
+        int aRow = by * bm + ty;
+        int aCol = t * bk + tx;
+        As[ty][tx] = (aRow < M && aCol < K) ? A[aRow * K + aCol] : 0.0f;
+        
+        // Load tile of B into shared memory
+        int bRow = t * bk + ty;
+        int bCol = bx * bn + tx;
+        Bs[ty][tx] = (bRow < K && bCol < N) ? B[bRow * N + bCol] : 0.0f;
+        
+        __syncthreads();
+        
+        // Compute partial product for this tile
+        for (int i = 0; i < bk; ++i) {
+            sum += As[ty][i] * Bs[i][tx];
         }
-        c[x * n + y] = tmp;
+        
+        __syncthreads();
+    }
+    
+    // Write result to global memory
+    if (row < M && col < N) {
+        C[row * N + col] = sum;
     }
 }
 
@@ -36,19 +67,19 @@ __global__ void compute_abs_diff(const float *a, const float *b, float *diff, in
 }
 
 
+
+
 int main() {
-    int m = 1024, n = 1024, k = 1024;
+    int m = 2048, n = 2048, k = 2048;
     float *A, *B;
     float *d_A, *d_B, *d_C;
     size_t size_A = m * k * sizeof(float);
     size_t size_B = k * n * sizeof(float);
     size_t size_C = m * n * sizeof(float);
-
     A = (float*)malloc(size_A);
     B = (float*)malloc(size_B);
     initialize_random_normal(A, m * k);
     initialize_random_normal(B, k * n);
-
     cudaMalloc(&d_A, size_A);
     cudaMalloc(&d_B, size_B);
     cudaMalloc(&d_C, size_C);
@@ -56,33 +87,29 @@ int main() {
     cudaMemcpy(d_B, B, size_B, cudaMemcpyHostToDevice);
     cudaMemset(d_C, 0, size_C);
 
-    dim3 threadsPerBlock(16, 16);
-    dim3 numBlocks((m + threadsPerBlock.x - 1) / threadsPerBlock.x,
-                   (n + threadsPerBlock.y - 1) / threadsPerBlock.y);
+    const int BM = 16;
+    const int BN = 16;
+    const int BK = 16;
+    dim3 threadsPerBlock(BN, BM);
+    dim3 numBlocks((n + BN - 1) / BN,
+                   (m + BM - 1) / BM);
     for (int i = 0; i < 10; ++i) {
-        matrix_multiply_kernel<<<numBlocks, threadsPerBlock>>>(d_A, d_B, d_C, m, n, k);
+        matrix_multiply<BM, BN, BK><<<numBlocks, threadsPerBlock>>>(d_A, d_B, d_C, m, n, k);
     }
+
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     cudaEventRecord(start);
     for (int i = 0; i < 100; ++i) {
-        matrix_multiply_kernel<<<numBlocks, threadsPerBlock>>>(d_A, d_B, d_C, m, n, k);
+        matrix_multiply<BM, BN, BK><<<numBlocks, threadsPerBlock>>>(d_A, d_B, d_C, m, n, k);
     }
+    cudaDeviceSynchronize();
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
-
-    float avg_ms = milliseconds / 100.0f;
-    printf("Average time per SGEMM: %.6f ms\n", avg_ms);
-
-    double bytes = (double)(m * k + n * k + m * n) * sizeof(float);
-    double bandwidth = bytes / (avg_ms * 1e-3) / 1e9;
-
-    printf("Bandwidth: %.6f GB/s\n", bandwidth);
-    double tflops = static_cast<double>(2) * m * n * k / (avg_ms * 1e-3) / 1e12;
-    printf("TFLOPS: %.6f\n", tflops);
+    double avg_ms = milliseconds / 100.0;
 
     // Verify with cuBLAS
     cublasHandle_t handle;
@@ -100,7 +127,7 @@ int main() {
                 d_A, k,
                 &beta,
                 d_C_ref, n);
-    
+
     // Compute absolute differences on GPU
     float *d_diff;
     cudaMalloc(&d_diff, size_C);
@@ -138,10 +165,14 @@ int main() {
     cudaFree(d_diff);
     cublasDestroy(handle);
     cudaFree(d_C_ref);
+    cudaDeviceSynchronize();
 
-    cudaFree(d_A);
-    cudaFree(d_B);
-    cudaFree(d_C);
-    free(A);
-    free(B);
+    std::cout << "average time: " << avg_ms << " ms" << std::endl;
+    double bytes = (double)(m * k + n * k + m * n) * sizeof(float);
+    double bandwidth = bytes / (avg_ms * 1e-3) / 1e9;
+    std::cout << "Bandwidth: " << bandwidth << " GB/s" << std::endl;
+    double tflops = static_cast<double>(2) * m * n * k / (avg_ms * 1e-3) / 1e12;
+    std::cout << "TFLOPS: " << tflops << std::endl;
+    
+    return 0;
 }
