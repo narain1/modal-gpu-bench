@@ -4,7 +4,6 @@
 #include <cublas_v2.h>
 #include <cub/cub.cuh>
 
-
 void initialize_random_normal(float *data, size_t n) {
     std::mt19937 generator(42);
     std::normal_distribution<float> distribution(0.0f, 1.0f);
@@ -13,143 +12,111 @@ void initialize_random_normal(float *data, size_t n) {
     }
 }
 
-template <typename T> struct Afrag_16x16 {
-  static constexpr size_t ne = 8; // num of elements per thread
 
-  T x[ne];
-
-  static __device__ size_t get_row(int tid, int l) {
-    int group_id = tid >> 2;
-    return group_id + 8 * ((l / 2) % 2);
-  }
-
-  static __device__ size_t get_col(int tid, int l) {
-    return 2 * (tid % 4) + (l % 2) + 8 * (l / 4);
-  }
-};
-
-template <typename T> struct Bfrag_16x8 {
-  static constexpr size_t ne = 4;
-  T x[ne] = {};
-  static __device__ size_t get_row(int tid, int l) {
-    return (tid % 4) * 2 + (l % 2) + 8 * (l / 2);
-  }
-
-  static __device__ size_t get_col(int tid, int l) { return tid >> 2; }
-};
-
-// BM, BN: Block tile dimensions (shared memory tiles)
-// BK: K dimension of block tile
-// TM, TN: Thread tile dimensions (each thread computes TM x TN outputs)
-template<const int BM, const int BN, const int BK, const int TM, const int TN>
+template<const int bm, const int bn, const int bk>
 __global__ void matrix_multiply(const float *A, const float *B, float *C, int M, int N, int K) {
-    // Shared memory for tiles of A and B
-    __shared__ float As[BM][BK];
-    __shared__ float Bs[BK][BN];
+    __shared__ float As[bm][bk];
+    __shared__ float Bs[bk][bn];
     
-    // Thread indices
-    const int tx = threadIdx.x;
-    const int ty = threadIdx.y;
-    const int threadCol = tx * TN;
-    const int threadRow = ty * TM;
+    constexpr int V = 4; // vector width for loading/storing
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
     
-    // Block indices
-    const int bx = blockIdx.x;
-    const int by = blockIdx.y;
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
     
-    // Global position of the thread's tile
-    const int globalRow = by * BM + threadRow;
-    const int globalCol = bx * BN + threadCol;
+    int row = by * bm + ty;
+    int colBase = bx * bn + tx * V;
     
-    // Number of threads per block dimension
-    const int threadsPerBlockX = BN / TN;
-    const int threadsPerBlockY = BM / TM;
+    float sum[V] = {0.0f};
     
-    // Each thread computes TM x TN output elements - use register array
-    float accum[TM][TN] = {0.0f};
+    int numTiles = (K + bk - 1) / bk;
     
-    // Register caches for As and Bs tiles
-    float regA[TM];
-    float regB[TN];
-    
-    // Number of tiles needed
-    const int numTiles = (K + BK - 1) / BK;
-    
-    // Loop over tiles in K dimension
     for (int t = 0; t < numTiles; ++t) {
-        // Collaborative loading of A tile into shared memory
-        // Each thread loads multiple elements
-        #pragma unroll
-        for (int i = 0; i < BM; i += threadsPerBlockY) {
-            #pragma unroll
-            for (int j = 0; j < BK; j += threadsPerBlockX) {
-                int row = i + ty;
-                int col = j + tx;
-                if (row < BM && col < BK) {
-                    int globalRowA = by * BM + row;
-                    int globalColA = t * BK + col;
-                    As[row][col] = (globalRowA < M && globalColA < K) ? 
-                                   A[globalRowA * K + globalColA] : 0.0f;
+        // Each thread loads one element
+        {
+            int tid = ty * (bn / V) + tx;  // flat thread id
+            int totalLoads = (bm * bk) / V;
+            
+            for (int i = tid; i < totalLoads; i += (bm * (bn / V))) {
+                int aSmRow = i / (bk / V);
+                int aSmCol = (i % (bk / V)) * V;
+
+                int aRow = by * bm + aSmRow;
+                int aCol = t * bk + aSmCol;
+
+                float4 aVec;
+                if (aRow < M && aCol + V - 1 < K) {
+                    aVec = *reinterpret_cast<const float4*>(&A[aRow * K + aCol]);
+                } else {
+                    aVec = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                    // Handle partial boundary
+                    if (aRow < M) {
+                        if (aCol + 0 < K) aVec.x = A[aRow * K + aCol + 0];
+                        if (aCol + 1 < K) aVec.y = A[aRow * K + aCol + 1];
+                        if (aCol + 2 < K) aVec.z = A[aRow * K + aCol + 2];
+                        if (aCol + 3 < K) aVec.w = A[aRow * K + aCol + 3];
+                    }
                 }
+
+                As[aSmRow][aSmCol + 0] = aVec.x;
+                As[aSmRow][aSmCol + 1] = aVec.y;
+                As[aSmRow][aSmCol + 2] = aVec.z;
+                As[aSmRow][aSmCol + 3] = aVec.w;
             }
         }
         
-        // Collaborative loading of B tile into shared memory
-        #pragma unroll
-        for (int i = 0; i < BK; i += threadsPerBlockY) {
-            #pragma unroll
-            for (int j = 0; j < BN; j += threadsPerBlockX) {
-                int row = i + ty;
-                int col = j + tx;
-                if (row < BK && col < BN) {
-                    int globalRowB = t * BK + row;
-                    int globalColB = bx * BN + col;
-                    Bs[row][col] = (globalRowB < K && globalColB < N) ? 
-                                   B[globalRowB * N + globalColB] : 0.0f;
+        // Load tile of B into shared memory
+        {
+            int tid = ty * (bn / V) + tx;
+            int totalLoads = (bk * bn) / V;
+
+            for (int i = tid; i < totalLoads; i += (bm * (bn / V))) {
+                int bSmRow = i / (bn / V);
+                int bSmCol = (i % (bn / V)) * V;
+
+                int bRow = t * bk + bSmRow;
+                int bCol = bx * bn + bSmCol;
+
+                float4 bVec;
+                if (bRow < K && bCol + V - 1 < N) {
+                    bVec = *reinterpret_cast<const float4*>(&B[bRow * N + bCol]);
+                } else {
+                    bVec = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                    if (bRow < K) {
+                        if (bCol + 0 < N) bVec.x = B[bRow * N + bCol + 0];
+                        if (bCol + 1 < N) bVec.y = B[bRow * N + bCol + 1];
+                        if (bCol + 2 < N) bVec.z = B[bRow * N + bCol + 2];
+                        if (bCol + 3 < N) bVec.w = B[bRow * N + bCol + 3];
+                    }
                 }
+
+                Bs[bSmRow][bSmCol + 0] = bVec.x;
+                Bs[bSmRow][bSmCol + 1] = bVec.y;
+                Bs[bSmRow][bSmCol + 2] = bVec.z;
+                Bs[bSmRow][bSmCol + 3] = bVec.w;
             }
         }
-        
+
         __syncthreads();
         
-        // Compute partial products for this tile
-        // Each thread computes TM x TN outputs
-        #pragma unroll
-        for (int k = 0; k < BK; ++k) {
-            // Load TM elements from As into registers
-            #pragma unroll
-            for (int i = 0; i < TM; ++i) {
-                regA[i] = As[threadRow + i][k];
-            }
-            
-            // Load TN elements from Bs into registers
-            #pragma unroll
-            for (int j = 0; j < TN; ++j) {
-                regB[j] = Bs[k][threadCol + j];
-            }
-            
-            // Outer product: update TM x TN accumulators
-            #pragma unroll
-            for (int i = 0; i < TM; ++i) {
-                #pragma unroll
-                for (int j = 0; j < TN; ++j) {
-                    accum[i][j] = fmaf(regA[i], regB[j], accum[i][j]);
-                }
-            }
+        // Compute partial product for this tile
+        for (int i = 0; i < bk; ++i) {
+            float aVal = As[ty][i];
+            sum[0] += aVal * Bs[i][tx * V + 0];
+            sum[1] += aVal * Bs[i][tx * V + 1];
+            sum[2] += aVal * Bs[i][tx * V + 2];
+            sum[3] += aVal * Bs[i][tx * V + 3];
         }
-        
+
         __syncthreads();
     }
     
-    // Write results to global memory
-    #pragma unroll
-    for (int i = 0; i < TM; ++i) {
-        #pragma unroll
-        for (int j = 0; j < TN; ++j) {
-            int row = globalRow + i;
-            int col = globalCol + j;
-            if (row < M && col < N) {
-                C[row * N + col] = accum[i][j];
+    // Write result to global memory
+    if (row < M) {
+        for (int v = 0; v < V; ++v) {
+            if (colBase + v < N) {
+                C[row * N + colBase + v] = sum[v];
             }
         }
     }
@@ -184,21 +151,15 @@ int main() {
     cudaMemcpy(d_B, B, size_B, cudaMemcpyHostToDevice);
     cudaMemset(d_C, 0, size_C);
 
-    // Block tile dimensions (shared memory)
-    const int BM = 64;  // Increased from 16
-    const int BN = 64;  // Increased from 16
-    const int BK = 8;    // K tile dimension
-    
-    // Thread tile dimensions (each thread computes TM x TN outputs)
-    const int TM = 4;
-    const int TN = 4;
-    
-    // Threads per block = (BM/TM) x (BN/TN)
-    dim3 threadsPerBlock(BN / TN, BM / TM);  // 16 x 16 = 256 threads
+    const int BM = 16;
+    const int BN = 16;
+    const int BK = 16;
+    const int V = 4;
+    dim3 threadsPerBlock(BN/V, BM);
     dim3 numBlocks((n + BN - 1) / BN,
                    (m + BM - 1) / BM);
     for (int i = 0; i < 10; ++i) {
-        matrix_multiply<BM, BN, BK, TM, TN><<<numBlocks, threadsPerBlock>>>(d_A, d_B, d_C, m, n, k);
+        matrix_multiply<BM, BN, BK><<<numBlocks, threadsPerBlock>>>(d_A, d_B, d_C, m, n, k);
     }
 
     cudaEvent_t start, stop;
@@ -206,9 +167,8 @@ int main() {
     cudaEventCreate(&stop);
     cudaEventRecord(start);
     for (int i = 0; i < 100; ++i) {
-        matrix_multiply<BM, BN, BK, TM, TN><<<numBlocks, threadsPerBlock>>>(d_A, d_B, d_C, m, n, k);
+        matrix_multiply<BM, BN, BK><<<numBlocks, threadsPerBlock>>>(d_A, d_B, d_C, m, n, k);
     }
-
     cudaDeviceSynchronize();
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);

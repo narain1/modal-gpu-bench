@@ -4,7 +4,6 @@
 #include <cublas_v2.h>
 #include <cub/cub.cuh>
 
-
 void initialize_random_normal(float *data, size_t n) {
     std::mt19937 generator(42);
     std::normal_distribution<float> distribution(0.0f, 1.0f);
@@ -13,30 +12,6 @@ void initialize_random_normal(float *data, size_t n) {
     }
 }
 
-template <typename T> struct Afrag_16x16 {
-  static constexpr size_t ne = 8; // num of elements per thread
-
-  T x[ne];
-
-  static __device__ size_t get_row(int tid, int l) {
-    int group_id = tid >> 2;
-    return group_id + 8 * ((l / 2) % 2);
-  }
-
-  static __device__ size_t get_col(int tid, int l) {
-    return 2 * (tid % 4) + (l % 2) + 8 * (l / 4);
-  }
-};
-
-template <typename T> struct Bfrag_16x8 {
-  static constexpr size_t ne = 4;
-  T x[ne] = {};
-  static __device__ size_t get_row(int tid, int l) {
-    return (tid % 4) * 2 + (l % 2) + 8 * (l / 2);
-  }
-
-  static __device__ size_t get_col(int tid, int l) { return tid >> 2; }
-};
 
 // BM, BN: Block tile dimensions (shared memory tiles)
 // BK: K dimension of block tile
@@ -77,19 +52,22 @@ __global__ void matrix_multiply(const float *A, const float *B, float *C, int M,
     
     // Loop over tiles in K dimension
     for (int t = 0; t < numTiles; ++t) {
-        // Collaborative loading of A tile into shared memory
-        // Each thread loads multiple elements
         #pragma unroll
         for (int i = 0; i < BM; i += threadsPerBlockY) {
             #pragma unroll
-            for (int j = 0; j < BK; j += threadsPerBlockX) {
+            for (int j = 0; j < BK / 4; j += threadsPerBlockX) {
                 int row = i + ty;
                 int col = j + tx;
                 if (row < BM && col < BK) {
                     int globalRowA = by * BM + row;
                     int globalColA = t * BK + col;
-                    As[row][col] = (globalRowA < M && globalColA < K) ? 
-                                   A[globalRowA * K + globalColA] : 0.0f;
+                    float4 val = (globalRowA < M && globalColA + 3 < K) ? 
+                                  reinterpret_cast<const float4*>(A)[(globalRowA * K + globalColA) / 4] : 
+                                  make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                    As[row][col] = val.x;
+                    if (col + 1 < BK) As[row][col + 1] = val.y;
+                    if (col + 2 < BK) As[row][col + 2] = val.z;
+                    if (col + 3 < BK) As[row][col + 3] = val.w;
                 }
             }
         }
@@ -98,12 +76,22 @@ __global__ void matrix_multiply(const float *A, const float *B, float *C, int M,
         #pragma unroll
         for (int i = 0; i < BK; i += threadsPerBlockY) {
             #pragma unroll
-            for (int j = 0; j < BN; j += threadsPerBlockX) {
+            for (int j = 0; j < BN / 4; j += threadsPerBlockX) {
                 int row = i + ty;
                 int col = j + tx;
                 if (row < BK && col < BN) {
                     int globalRowB = t * BK + row;
                     int globalColB = bx * BN + col;
+                    float4 val = (globalRowB < K && globalColB + 3 < N) ? 
+                                  reinterpret_cast<const float4*>(B)[(globalRowB * N + globalColB) / 4] : 
+                                  make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                    Bs[row][col] = val.x;
+                    if (col + 1 < BN) Bs[row][col + 1] = val.y;
+                    if (col + 2 < BN) Bs[row][col + 2] = val.z;
+                    if (col + 3 < BN) Bs[row][col + 3] = val.w;
+                } else if (row < BK && col < BN) {
+                    int globalRowB = t * BK + row;
+                    int globalColB = bx * BN + col; 
                     Bs[row][col] = (globalRowB < K && globalColB < N) ? 
                                    B[globalRowB * N + globalColB] : 0.0f;
                 }
@@ -185,8 +173,8 @@ int main() {
     cudaMemset(d_C, 0, size_C);
 
     // Block tile dimensions (shared memory)
-    const int BM = 64;  // Increased from 16
-    const int BN = 64;  // Increased from 16
+    const int BM = 64;  
+    const int BN = 64;
     const int BK = 8;    // K tile dimension
     
     // Thread tile dimensions (each thread computes TM x TN outputs)
