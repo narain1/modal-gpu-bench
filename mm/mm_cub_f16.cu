@@ -57,7 +57,7 @@ int main() {
     double tflops = static_cast<double>(2) * m * n * k / (milliseconds / 100.0 / 1e3) / 1e12;
     printf("TFLOPS: %f\n", tflops);
     double bytes = (double(m)*k + double(k)*n + double(m)*n) * sizeof(__half); 
-    double bandwidth = bytes / (milliseconds / 1e3) / 1e9;
+    double bandwidth = bytes / (milliseconds / 100.0 / 1e3) / 1e9;
     printf("Bandwidth: %f GB/s\n", bandwidth);
 
     cublasDestroy(handle);
