@@ -14,7 +14,7 @@ void initialize_random_normal(float *data, size_t n) {
 }
 
 int main() {
-    int m = 1024, n = 1024, k = 1024;
+    int m = 2048, n = 2048, k = 2048;
     float *A, *B;
     float *d_A, *d_B, *d_C;
     size_t size_A = m * k * sizeof(float);
