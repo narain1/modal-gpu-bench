@@ -151,9 +151,9 @@ int main() {
     cudaMemcpy(d_B, B, size_B, cudaMemcpyHostToDevice);
     cudaMemset(d_C, 0, size_C);
 
-    const int BM = 16;
-    const int BN = 16;
-    const int BK = 16;
+    const int BM = 32;
+    const int BN = 32;
+    const int BK = 32;
     const int V = 4;
     dim3 threadsPerBlock(BN/V, BM);
     dim3 numBlocks((n + BN - 1) / BN,

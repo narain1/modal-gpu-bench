@@ -88,7 +88,7 @@ def execute(script: str, gpu: str, timeout: int):
 
     nvcc_flags = ["-O3", "-lcublas", "-lcudnn"]
     if gpu.upper().startswith("H100") or gpu.upper().startswith("H200") or gpu.upper().startswith("B200"):
-        nvcc_flags.append("-arch=sm_90")
+        nvcc_flags.append("-arch=sm_100")
     elif gpu.upper().startswith("A100"):
         nvcc_flags.append("-arch=sm_80")
     elif gpu.upper().startswith("T4"):
